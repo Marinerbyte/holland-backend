@@ -8,35 +8,18 @@ import socket
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Sirf Discord aur AbuseIPDB) ---
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
 ABUSEIPDB_KEY = os.environ.get('ABUSEIPDB_KEY')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 # 1x1 pixel ki transparent GIF image
 PIXEL_BYTES = b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b'
 
-# --- Notification Functions ---
-def send_to_discord(embed):
-    if not DISCORD_WEBHOOK_URL: return
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
-    except Exception as e:
-        print(f"ERROR (Discord): {e}")
-
-def send_to_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = { 'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown' }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"ERROR (Telegram): {e}")
-
 # --- Main Logging Route ---
 @app.route('/assets/tracker.gif')
 def track():
+    # --- Desktop Redirect Hata Diya Gaya Hai ---
+    
     # Step 1: Data Capture (Optimized)
     raw_ip_list = request.headers.get('X-Forwarded-For', request.remote_addr)
     ip_address = raw_ip_list.split(',')[0].strip()
@@ -46,7 +29,6 @@ def track():
     user_message = request.args.get('message', 'N/A')
     visitor_type = "Returning ♻️" if request.args.get('isNew') == 'false' else "New ✨"
     
-    # Zaroori parameters hi receive kar rahe hain
     screen_res, os_type, browser, is_touch, timezone, languages, ad_blocker, canvas_hash, referrer = [request.args.get(k, 'N/A') for k in ['screen', 'os', 'browser', 'touch', 'timezone', 'langs', 'adBlock', 'canvas']] + [request.headers.get('Referer', 'Direct Visit')]
     is_touch = 'Yes' if is_touch == 'true' else 'No'
     ad_blocker_status = 'Detected 🛡️' if ad_blocker == 'true' else 'Not Detected 🟢'
@@ -78,7 +60,7 @@ def track():
         except Exception as e: print(f"ERROR AbuseIPDB: {e}")
     else: abuse_score = "API Key Missing"
 
-    # Step 3: Prepare Notifications (Optimized Embed)
+    # Step 3: Prepare Discord Embed
     discord_embed = {
         "author": { "name": f"Holland Intel Report: {visitor_type} Visitor", "icon_url": "https://i.imgur.com/M6yB8oA.png" },
         "description": f"**Subject:** `{username}`\n**IP Address:** `{ip_address}`\n**Threat Assessment:** **{threat_level}**",
@@ -93,20 +75,13 @@ def track():
         ],
         "footer": { "text": f"Canvas: {canvas_hash} | AdBlocker: {ad_blocker_status}" }
     }
-    telegram_message = (
-        f"*{visitor_type} Visitor*\n\n"
-        f"👤 *Subject:* `{username}`\n"
-        f"🌐 *IP Address:* `{ip_address}`\n"
-        f"🚨 *Threat Assessment:* *{threat_level}*\n\n"
-        f"*📍 Location:* `{geo_info}`\n"
-        f"*🏢 Network:* `{asn_info}`\n"
-        f"*💻 Device:* `{os_type} | {browser}`\n"
-        f"*💬 Message:* `{user_message}`"
-    )
 
-    # Step 4: Send Notifications
-    send_to_discord(discord_embed)
-    send_to_telegram(telegram_message)
+    # Step 4: Send Notification
+    if DISCORD_WEBHOOK_URL:
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [discord_embed]}, timeout=10)
+        except Exception as e:
+            print(f"ERROR (Discord): {e}")
 
     return send_file(io.BytesIO(PIXEL_BYTES), mimetype='image/gif')
 
